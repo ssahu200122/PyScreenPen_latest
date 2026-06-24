@@ -1,0 +1,12 @@
+{
+    "increase_size": "Ctrl+Shift+{",
+    "decrease_size": "Ctrl+Shift+}",
+    "toggle_eraser": "Alt+B",
+    "toggle_cursor": "Ctrl+Shift+T",
+    "toggle_board": "Ctrl+Shift+W",
+    "toggle_lasso": "Ctrl+Shift+L",
+    "clear_canvas": "Ctrl+Shift+D",
+    "toggle_laser": "Ctrl+Shift+H",
+    "exit_app": "Ctrl+Q",
+    "toggle_visibility": "Ctrl+Shift+G"
+}
