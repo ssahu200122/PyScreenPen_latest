@@ -65,6 +65,7 @@ class Canvas(QWidget):
         self.current_stroke = None 
         
         self.active_tool = "tool_pen_1"
+        self.last_non_selection_tool = "tool_pen_1"
         self.active_color = state.current_color
         self.active_size = state.current_thickness
         self.active_opacity = state.current_opacity
@@ -394,6 +395,7 @@ class Canvas(QWidget):
     def set_tool(self, tool_id):
         if "select" not in tool_id and "cursor" not in tool_id:
             self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False); self.update()
+            self.last_non_selection_tool = tool_id
 
         if tool_id in ["tool_pen_1", "tool_pen_2"]: self.last_pen_used = tool_id
 
@@ -580,7 +582,7 @@ class Canvas(QWidget):
         
         points_array = np.array([[p.x(), p.y()] for p in self.current_points], dtype=np.int32)
         start = self.current_points[0]; end = self.current_points[-1]
-        perimeter = cv2.arcLength(points_array, False) 
+        perimeter = cv2.arcLength(points_array, True) 
         if perimeter == 0: return
         linearity = math.hypot(end.x() - start.x(), end.y() - start.y()) / perimeter
         
@@ -589,7 +591,9 @@ class Canvas(QWidget):
         if linearity > 0.95:
             shape_type = "line"; detected_path.moveTo(start); detected_path.lineTo(end)
         else:
-            approx_curve = cv2.approxPolyDP(points_array, 0.02 * perimeter, True) 
+            hull = cv2.convexHull(points_array)
+            hull_perimeter = cv2.arcLength(hull, True)
+            approx_curve = cv2.approxPolyDP(hull, 0.04 * hull_perimeter, True) 
             vertex_count = len(approx_curve)
             poly_qpoints = [QPointF(float(p[0][0]), float(p[0][1])) for p in approx_curve]
             
@@ -784,9 +788,31 @@ class Canvas(QWidget):
         pos = event.position(); pressure = event.pressure(); btns = event.buttons()
         if pressure == 0.0: pressure = 1.0 
         
-        if event.type() == QTabletEvent.TabletPress: self._handle_input(pos, pressure, "press", Qt.LeftButton if btns == Qt.NoButton else btns); event.accept()
+        if event.type() == QTabletEvent.TabletPress:
+            now = time.time()
+            last_t = getattr(self, "_last_tablet_press_time", 0.0)
+            last_pos = getattr(self, "_last_tablet_press_pos", None)
+            is_double_tap = (now - last_t) < 0.4 and last_pos is not None and (pos - last_pos).manhattanLength() < 25
+            self._last_tablet_press_time = now; self._last_tablet_press_pos = pos
+
+            if is_double_tap and self.try_exit_selection_mode(pos):
+                self._last_tablet_press_time = 0.0; event.accept(); return
+
+            self._handle_input(pos, pressure, "press", Qt.LeftButton if btns == Qt.NoButton else btns); event.accept()
         elif event.type() == QTabletEvent.TabletMove: self._handle_input(pos, pressure, "move", btns); event.accept()
         elif event.type() == QTabletEvent.TabletRelease: self._handle_input(pos, pressure, "release", btns); event.accept()
+
+    def try_exit_selection_mode(self, pos):
+        """If something is selected and `pos` isn't on the selection or a handle,
+        drop out of selection mode back to whatever tool was active before.
+        Returns True if it exited (caller should swallow the event)."""
+        if not (("select" in self.active_tool or "cursor" in self.active_tool) and self.selected_indices):
+            return False
+        if self.selection_rect.contains(pos): return False
+        for key, rect in self.get_handles().items():
+            if rect.contains(pos): return False
+        state.set_active_tool(getattr(self, "last_non_selection_tool", "tool_pen_1"))
+        return True
 
     def mousePressEvent(self, event): self._handle_input(event.position(), 1.0, "press", event.button())
     def mouseMoveEvent(self, event): self._handle_input(event.position(), 1.0, "move", event.buttons())
@@ -794,6 +820,9 @@ class Canvas(QWidget):
     def mouseDoubleClickEvent(self, event):
         if self.active_tool == "tool_polygon" and self.current_stroke and self.current_stroke["type"] == "poly_path":
             self.finalize_polygon(); return
+
+        if self.try_exit_selection_mode(event.position()): return
+
         self._handle_input(event.position(), 1.0, "press", event.button())
 
     def finalize_polygon(self):
@@ -807,10 +836,20 @@ class Canvas(QWidget):
         poly = QPolygonF(pts); poly.append(pts[0])
         path = QPainterPath(); path.addPolygon(poly); path.closeSubpath()
         self.current_stroke["path"] = path
-        self.strokes.append(self.current_stroke)
+        final_stroke = self.current_stroke
+        self.strokes.append(final_stroke)
         painter = QPainter(self.buffer_pixmap); painter.setRenderHint(QPainter.Antialiasing)
-        self.draw_stroke_entity(painter, self.current_stroke); painter.end()
+        self.draw_stroke_entity(painter, final_stroke); painter.end()
         self.current_stroke = None
+        self.update()
+
+        new_idx = len(self.strokes) - 1
+        state.set_active_tool("tool_cursor")
+        self.selected_indices = [new_idx]
+        self.update_selection_rect(); state.set_selection_active(True)
+        self.is_internal_sync = True
+        state.sync_tool_properties(color=final_stroke.get("color", QColor("black")), thickness=final_stroke.get("size", 2), style=final_stroke.get("style", Qt.SolidLine), is_filled=final_stroke.get("fill_enabled", False), fill_color=final_stroke.get("fill_color", state.current_fill_color))
+        self.is_internal_sync = False
         self.update()
 
     def cancel_polygon(self):
@@ -1046,6 +1085,16 @@ class Canvas(QWidget):
                     painter = QPainter(self.buffer_pixmap); painter.setRenderHint(QPainter.Antialiasing)
                     self.draw_stroke_entity(painter, final_stroke); painter.end()
                     self.current_stroke = None; self.update()
+
+                    if final_stroke["type"] in ["line", "arrow", "rect", "circle", "star", "curve", "triangle"]:
+                        new_idx = len(self.strokes) - 1
+                        state.set_active_tool("tool_cursor")
+                        self.selected_indices = [new_idx]
+                        self.update_selection_rect(); state.set_selection_active(True)
+                        self.is_internal_sync = True
+                        state.sync_tool_properties(color=final_stroke.get("color", QColor("black")), thickness=final_stroke.get("size", 2), style=final_stroke.get("style", Qt.SolidLine), is_filled=final_stroke.get("fill_enabled", False), fill_color=final_stroke.get("fill_color", state.current_fill_color))
+                        self.is_internal_sync = False
+                        self.update()
 
     def draw_selection_overlay(self, painter):
         if not self.selected_indices: return
