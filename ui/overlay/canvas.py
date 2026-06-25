@@ -84,6 +84,7 @@ class Canvas(QWidget):
         self.move_start_pos = QPointF()
         
         self.edit_btn_rect = None
+        self.done_btn_rect = None
         self.active_text_widget = None
         self.buffer_pixmap = None
         self.menu_ref = None 
@@ -279,8 +280,9 @@ class Canvas(QWidget):
             self.update_selection_rect(); self.redraw_buffer(); self.update()
 
     def update_selection_rect(self):
+        self._refresh_transparency()
         if not self.selected_indices:
-            self.selection_rect = QRectF(); self.selection_path = None; self.edit_btn_rect = None; return
+            self.selection_rect = QRectF(); self.selection_path = None; self.edit_btn_rect = None; self.done_btn_rect = None; return
         united_rect = QRectF()
         first = True
         for i in self.selected_indices:
@@ -297,6 +299,17 @@ class Canvas(QWidget):
         self.selection_path = QPainterPath(); self.selection_path.addRect(self.selection_rect)
         btn_size = 28
         self.edit_btn_rect = QRectF(self.selection_rect.right() - btn_size/2, self.selection_rect.top() - btn_size/2, btn_size, btn_size)
+        self.done_btn_rect = QRectF(self.selection_rect.left() - btn_size/2, self.selection_rect.top() - btn_size/2, btn_size, btn_size)
+
+    def _refresh_transparency(self):
+        """Keeps WA_TransparentForMouseEvents in sync with whether we actually need
+        to catch mouse input right now (selection active, or board/pattern showing).
+        Without this, tool_cursor stays click-through even with a selection, so taps
+        meant for handles/exit-selection leak straight through to the desktop/apps below."""
+        if self.active_tool not in ["tool_cursor", "tool_pan"]: return
+        is_board_active = state.board_color.alpha() > 0 or state.pattern_type != "none"
+        is_selecting = bool(self.selected_indices)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not is_board_active and not is_selecting)
 
     def import_image_from_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Import Image", "", "Images (*.png *.xpm *.jpg *.bmp *.jpeg)")
@@ -415,7 +428,8 @@ class Canvas(QWidget):
         self.apply_custom_cursor(tool_id)
         
         is_board_active = state.board_color.alpha() > 0 or state.pattern_type != "none"
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, not is_board_active if tool_id in ["tool_cursor", "tool_pan"] else False)
+        is_selecting = bool(self.selected_indices)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, (not is_board_active and not is_selecting) if tool_id in ["tool_cursor", "tool_pan"] else False)
         self.update(); self.setFocus() 
 
     def set_color(self, color): 
@@ -879,6 +893,10 @@ class Canvas(QWidget):
                             return
 
                 if self.edit_btn_rect and self.edit_btn_rect.contains(pos): state.request_menu_context.emit("selection_context"); return
+                if self.done_btn_rect and self.done_btn_rect.contains(pos):
+                    self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False)
+                    state.set_active_tool(getattr(self, "last_non_selection_tool", "tool_pen_1"))
+                    return
                 if self.menu_ref and self.menu_ref.geometry().contains(pos.toPoint()): return 
                 
                 if self.active_tool == "tool_text":
@@ -892,9 +910,12 @@ class Canvas(QWidget):
 
                 if "select" in self.active_tool or "cursor" in self.active_tool:
                     if self.selected_indices and self.selection_rect.contains(pos): self.is_moving_selection = True; self.move_start_pos = pos; return
+                    had_selection = bool(self.selected_indices)
                     self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False)
                     if self.active_tool == "tool_select_lasso": self.selection_path = QPainterPath(); self.selection_path.moveTo(pos)
                     elif self.active_tool == "tool_select_rect": self.selection_path = QPainterPath() 
+                    if had_selection and self.active_tool == "tool_cursor":
+                        state.set_active_tool(getattr(self, "last_non_selection_tool", "tool_pen_1")); return
                     self.update(); return 
 
                 if "eraser" in self.active_tool and state.eraser_type == "stroke":
@@ -1115,6 +1136,20 @@ class Canvas(QWidget):
             if os.path.exists(icon_path):
                 pix = QPixmap(icon_path).scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 painter.drawPixmap(QRectF(self.edit_btn_rect.center().x()-8, self.edit_btn_rect.center().y()-8, 16, 16).toRect(), pix)
+
+        if self.done_btn_rect:
+            painter.setBrush(QColor("#22C55E")); painter.setPen(QPen(Qt.white, 2)); painter.drawEllipse(self.done_btn_rect)
+            done_icon_path = get_asset_path("done.png")
+            if os.path.exists(done_icon_path):
+                pix = QPixmap(done_icon_path).scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                painter.drawPixmap(QRectF(self.done_btn_rect.center().x()-8, self.done_btn_rect.center().y()-8, 16, 16).toRect(), pix)
+            else:
+                # No dedicated icon shipped - draw a simple checkmark so the button is still legible.
+                c = self.done_btn_rect.center()
+                check_pen = QPen(Qt.white, 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(check_pen)
+                painter.drawLine(QPointF(c.x()-6, c.y()), QPointF(c.x()-2, c.y()+5))
+                painter.drawLine(QPointF(c.x()-2, c.y()+5), QPointF(c.x()+7, c.y()-6))
 
     def draw_stroke_entity(self, painter, stroke):
         st_type = stroke["type"]
