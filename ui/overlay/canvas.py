@@ -2,6 +2,7 @@ import math
 import os
 import sys
 import time
+import random
 import cv2          
 import numpy as np
 import statistics
@@ -69,6 +70,7 @@ class Canvas(QWidget):
         self.active_opacity = state.current_opacity
         self.active_style = state.current_style
         self.active_font_style = state.current_font_style 
+        self.active_nib_angle = state.current_settings.get("nib_angle", 45)
         
         self.last_pos = QPointF() 
         self.current_pos = QPointF()
@@ -120,6 +122,13 @@ class Canvas(QWidget):
         self.shape_hold_timer.setInterval(600) 
         self.shape_hold_timer.setSingleShot(True)
         self.shape_hold_timer.timeout.connect(self.snap_to_shape)
+
+        # --- SPRAY / AIRBRUSH: timer-driven dot scatter while the button is held ---
+        self.spray_timer = QTimer(self)
+        self.spray_timer.setInterval(35)  # ~28 ticks/sec, fast enough to look continuous, light on CPU
+        self.spray_timer.timeout.connect(self.spray_tick)
+        self.last_spray_pos = QPointF()
+        self.last_spray_pressure = 1.0
 
         self.cursors = {}
         self.load_cursors()
@@ -209,6 +218,9 @@ class Canvas(QWidget):
     def set_menu_ref(self, menu): self.menu_ref = menu
 
     def get_stroke_type(self):
+        if "calligraphy" in self.active_tool: return "calligraphy"
+        if "spray" in self.active_tool: return "spray"
+        if "curve" in self.active_tool: return "curve"
         if "pen" in self.active_tool: return "pen"
         if "laser" in self.active_tool: return "laser_pen"
         if "hl" in self.active_tool: return "highlighter"
@@ -217,7 +229,7 @@ class Canvas(QWidget):
         if "arrow" in self.active_tool: return "arrow"
         if "rect" in self.active_tool: return "rect"
         if "circle" in self.active_tool: return "circle"
-        if "polygon" in self.active_tool: return "polygon"
+        if "polygon" in self.active_tool: return "poly_path"
         if "star" in self.active_tool: return "star"
         return "pen"
 
@@ -304,6 +316,8 @@ class Canvas(QWidget):
 
     def keyPressEvent(self, event):
         key = event.key()
+        if self.active_tool == "tool_polygon" and self.current_stroke and self.current_stroke["type"] == "poly_path" and key in (Qt.Key_Return, Qt.Key_Enter):
+            self.finalize_polygon(); event.accept(); return
         if key == Qt.Key_B: state.set_active_tool("tool_pen_2" if state.active_tool_id == "tool_pen_1" else "tool_pen_1")
         elif key == Qt.Key_E: state.set_active_tool("tool_pen_1" if "eraser" in state.active_tool_id else "tool_eraser") 
         elif key == Qt.Key_H: state.set_active_tool("tool_hl")
@@ -364,6 +378,7 @@ class Canvas(QWidget):
 
         elif key == Qt.Key_Escape:
             if self.active_text_widget: self.active_text_widget.deleteLater(); self.active_text_widget = None
+            elif self.current_stroke and self.current_stroke.get("type") == "poly_path": self.cancel_polygon()
             else: self.selected_indices = []; self.update_selection_rect(); self.active_handle = None; state.set_selection_active(False); state.set_active_tool("tool_cursor")
             self.update(); event.accept()
             
@@ -385,7 +400,7 @@ class Canvas(QWidget):
         self.active_tool = tool_id
         if self.active_text_widget: self.active_text_widget.deleteLater(); self.active_text_widget = None
         
-        is_shape = any(k in tool_id for k in ["line", "arrow", "rect", "circle", "polygon", "star"])
+        is_shape = any(k in tool_id for k in ["line", "arrow", "rect", "circle", "polygon", "star", "curve"])
         is_selection = "select" in tool_id or "cursor" in tool_id
         
         self.active_color = self.aesthetic_shape_color if (is_shape and not is_selection) else state.current_color
@@ -393,6 +408,7 @@ class Canvas(QWidget):
         self.active_opacity = state.current_opacity
         self.active_style = state.current_style
         self.active_font_style = state.current_font_style 
+        self.active_nib_angle = state.current_settings.get("nib_angle", 45)
         
         self.apply_custom_cursor(tool_id)
         
@@ -419,7 +435,14 @@ class Canvas(QWidget):
                 if stroke.get("locked", False): continue
                 stroke["size"] = size
                 c = stroke["color"]; c.setAlpha(opacity); stroke["color"] = c
-                if "points" in stroke and stroke["points"]: stroke["path"] = self.generate_variable_width_path(stroke["points"], size)
+                if stroke["type"] == "curve" and stroke.get("points"):
+                    stroke["path"] = self.generate_smooth_curve_path(stroke["points"], size)
+                elif stroke["type"] == "calligraphy" and stroke.get("points"):
+                    stroke["path"] = self.generate_calligraphy_path(stroke["points"], size, stroke.get("nib_angle", self.active_nib_angle))
+                elif stroke["type"] in ("spray", "poly_path"):
+                    pass  # spray's path is a baked dot-cloud; poly_path's path is a fixed vertex polygon - thickness only affects the stroke pen width at draw time
+                elif "points" in stroke and stroke["points"]:
+                    stroke["path"] = self.generate_variable_width_path(stroke["points"], size)
             self.update_selection_rect(); self.redraw_buffer(); self.update()
         
     def set_style(self, style_val):
@@ -495,7 +518,7 @@ class Canvas(QWidget):
                 if self.selection_path.contains(QRectF(stroke["pos"].x(), stroke["pos"].y() - stroke["size"], txt_w, txt_h)): self.selected_indices.append(i)
                 continue
 
-            if stroke["type"] in ["pen", "highlighter", "eraser", "laser_pen", "image"]:
+            if stroke["type"] in ["pen", "highlighter", "eraser", "laser_pen", "image", "spray", "curve", "calligraphy", "poly_path"]:
                 if self.selection_path.contains(stroke["path"]): self.selected_indices.append(i)
             else:
                 stroker = QPainterPathStroker(); stroker.setWidth(stroke["size"]) 
@@ -632,6 +655,124 @@ class Canvas(QWidget):
         path.setFillRule(Qt.WindingFill)
         return path
 
+    def generate_smooth_curve_path(self, points, base_size):
+        """Smooth curve tool: fits a Catmull-Rom spline through the captured points,
+        then runs the result through the same variable-width outline logic as the pen
+        so it keeps pressure-based width while losing the jittery polyline look."""
+        if not points or len(points) < 2:
+            path = QPainterPath()
+            if points: path.addEllipse(points[0][0], max(1.0, (base_size * points[0][1]) / 2), max(1.0, (base_size * points[0][1]) / 2))
+            return path
+
+        raw_pts = [p for p, _ in points]
+        pressures = [pr for _, pr in points]
+
+        if len(raw_pts) < 3:
+            return self.generate_variable_width_path(points, base_size)
+
+        # Catmull-Rom: resample ~6 interpolated points between each pair of originals,
+        # carrying interpolated pressure along so width still tapers smoothly.
+        smooth_points = []
+        n = len(raw_pts)
+        for i in range(n - 1):
+            p0 = raw_pts[i - 1] if i > 0 else raw_pts[i]
+            p1 = raw_pts[i]
+            p2 = raw_pts[i + 1]
+            p3 = raw_pts[i + 2] if i + 2 < n else p2
+            pr1 = pressures[i]; pr2 = pressures[i + 1]
+
+            steps = 6
+            for s in range(steps):
+                t = s / steps
+                t2 = t * t; t3 = t2 * t
+                x = 0.5 * ((2 * p1.x()) + (-p0.x() + p2.x()) * t +
+                           (2*p0.x() - 5*p1.x() + 4*p2.x() - p3.x()) * t2 +
+                           (-p0.x() + 3*p1.x() - 3*p2.x() + p3.x()) * t3)
+                y = 0.5 * ((2 * p1.y()) + (-p0.y() + p2.y()) * t +
+                           (2*p0.y() - 5*p1.y() + 4*p2.y() - p3.y()) * t2 +
+                           (-p0.y() + 3*p1.y() - 3*p2.y() + p3.y()) * t3)
+                pr = pr1 + (pr2 - pr1) * t
+                smooth_points.append((QPointF(x, y), pr))
+        smooth_points.append((raw_pts[-1], pressures[-1]))
+
+        return self.generate_variable_width_path(smooth_points, base_size)
+
+    def generate_calligraphy_path(self, points, base_size, nib_angle_deg):
+        """Calligraphy pen: a fixed-angle flat nib. Width at each segment comes from
+        how aligned the stroke direction is with the nib's angle - strokes that run
+        parallel to the nib are thin, strokes that cross it are wide, like a real
+        chisel-tip pen. This intentionally ignores pressure for width (the nib angle
+        is what drives variation here, not pressure) but pressure still nudges the
+        max width slightly so heavier presses still read as "more ink"."""
+        if not points or len(points) < 2:
+            path = QPainterPath()
+            if points: path.addEllipse(points[0][0], max(1.0, base_size / 2), max(1.0, base_size / 2))
+            return path
+
+        nib_rad = math.radians(nib_angle_deg)
+        nib_dx, nib_dy = math.cos(nib_rad), math.sin(nib_rad)
+
+        left_pts = []; right_pts = []
+        for i in range(len(points) - 1):
+            p1, press1 = points[i]; p2, press2 = points[i + 1]
+            dx = p2.x() - p1.x(); dy = p2.y() - p1.y()
+            length = math.hypot(dx, dy)
+            if length == 0: continue
+            move_dx, move_dy = dx / length, dy / length
+
+            # Width = how perpendicular the stroke direction is to the nib's own angle.
+            # Stroke running along the nib -> thin hairline. Stroke crossing it -> full width.
+            alignment = abs(move_dx * nib_dx + move_dy * nib_dy)  # 1.0 = parallel to nib, 0.0 = perpendicular
+            width_factor = 1.0 - (alignment * 0.85)  # never fully collapse to zero width
+            w1 = max(1.5, base_size * width_factor * max(0.6, press1))
+
+            offset_x = nib_dx * w1 * 0.5; offset_y = nib_dy * w1 * 0.5
+            left_pts.append(QPointF(p1.x() + offset_x, p1.y() + offset_y))
+            right_pts.append(QPointF(p1.x() - offset_x, p1.y() - offset_y))
+
+            if i == len(points) - 2:
+                w2 = max(1.5, base_size * width_factor * max(0.6, press2))
+                off2_x = nib_dx * w2 * 0.5; off2_y = nib_dy * w2 * 0.5
+                left_pts.append(QPointF(p2.x() + off2_x, p2.y() + off2_y))
+                right_pts.append(QPointF(p2.x() - off2_x, p2.y() - off2_y))
+
+        path = QPainterPath()
+        if left_pts:
+            path.moveTo(left_pts[0])
+            for p in left_pts[1:]: path.lineTo(p)
+            for p in reversed(right_pts): path.lineTo(p)
+            path.closeSubpath()
+        path.setFillRule(Qt.WindingFill)
+        return path
+
+    def spray_emit(self, pos, pressure):
+        """Scatters a burst of small dots around `pos` into the active spray stroke's
+        path. Tablet pressure (when present) widens the scatter radius and increases
+        dot count; plain mouse input uses a constant pressure of 1.0, so density stays
+        steady rather than feeling random."""
+        if not self.current_stroke or self.current_stroke["type"] != "spray": return
+        settings = state.current_settings
+        density = settings.get("spray_density", 14)
+        radius = max(4.0, self.active_size)
+
+        dot_count = max(1, int(density * (0.5 + 0.5 * pressure)))
+        dot_size = max(0.8, (self.active_size / 12.0) * (0.6 + 0.4 * pressure))
+
+        for _ in range(dot_count):
+            angle = random.uniform(0, 2 * math.pi)
+            # sqrt-distributed radius keeps dots from clumping dead-center
+            dist = radius * math.sqrt(random.uniform(0, 1))
+            dx, dy = math.cos(angle) * dist, math.sin(angle) * dist
+            self.current_stroke["path"].addEllipse(QPointF(pos.x() + dx, pos.y() + dy), dot_size, dot_size)
+
+    def spray_tick(self):
+        """Fired by spray_timer while the spray tool is held down, so the cloud keeps
+        building even if the cursor stays still - matching real airbrush behavior."""
+        if not self.is_drawing or not self.current_stroke or self.current_stroke["type"] != "spray":
+            self.spray_timer.stop(); return
+        self.spray_emit(self.last_spray_pos, self.last_spray_pressure)
+        self.update()
+
     def tabletEvent(self, event: QTabletEvent):
         try:
             if HAS_POINTING_DEVICE:
@@ -650,6 +791,31 @@ class Canvas(QWidget):
     def mousePressEvent(self, event): self._handle_input(event.position(), 1.0, "press", event.button())
     def mouseMoveEvent(self, event): self._handle_input(event.position(), 1.0, "move", event.buttons())
     def mouseReleaseEvent(self, event): self._handle_input(event.position(), 1.0, "release", event.button())
+    def mouseDoubleClickEvent(self, event):
+        if self.active_tool == "tool_polygon" and self.current_stroke and self.current_stroke["type"] == "poly_path":
+            self.finalize_polygon(); return
+        self._handle_input(event.position(), 1.0, "press", event.button())
+
+    def finalize_polygon(self):
+        """Closes off the in-progress multi-point polygon and commits it as a stroke.
+        Needs at least 3 vertices to be a real polygon rather than a stray click or line."""
+        if not self.current_stroke or self.current_stroke["type"] != "poly_path": return
+        pts = self.current_stroke["points"]
+        if len(pts) < 3:
+            self.current_stroke = None; self.update(); return
+
+        poly = QPolygonF(pts); poly.append(pts[0])
+        path = QPainterPath(); path.addPolygon(poly); path.closeSubpath()
+        self.current_stroke["path"] = path
+        self.strokes.append(self.current_stroke)
+        painter = QPainter(self.buffer_pixmap); painter.setRenderHint(QPainter.Antialiasing)
+        self.draw_stroke_entity(painter, self.current_stroke); painter.end()
+        self.current_stroke = None
+        self.update()
+
+    def cancel_polygon(self):
+        if self.current_stroke and self.current_stroke["type"] == "poly_path":
+            self.current_stroke = None; self.update()
 
     def _handle_input(self, posF, pressure, event_type, buttons):
         pos = posF; pressure = math.pow(pressure, 1.4) 
@@ -696,14 +862,44 @@ class Canvas(QWidget):
                     if self.delete_stroke_at(pos.toPoint()): self.redraw_buffer(); self.update()
                     return
 
+                # --- MULTI-POINT POLYGON: click to place vertices, no drag ---
+                if self.active_tool == "tool_polygon":
+                    self.is_drawing = False  # this tool is driven by clicks, not a press-drag-release
+                    if self.current_stroke is None:
+                        self.current_stroke = {
+                            "type": "poly_path", "color": QColor(self.active_color),
+                            "size": self.active_size, "style": self.active_style,
+                            "fill_enabled": state.current_fill_enabled, "fill_color": QColor(state.current_fill_color),
+                            "path": QPainterPath(), "points": [pos], "locked": False
+                        }
+                    else:
+                        pts = self.current_stroke["points"]
+                        last_vertex = pts[-1]
+                        if (pos - last_vertex).manhattanLength() > 3:  # ignore accidental double-registers
+                            # Magnetic close: clicking near the start vertex (and we have
+                            # enough points for a real polygon) snaps onto it and finishes
+                            # the shape immediately, instead of requiring a precise double-click.
+                            snap_radius = max(14, self.active_size * 2)
+                            if len(pts) >= 3 and (pos - pts[0]).manhattanLength() <= snap_radius:
+                                self.finalize_polygon(); return
+                            self.current_stroke["points"].append(pos)
+                    self.update(); return
+
                 self.current_stroke = {
                     "type": self.get_stroke_type(), "color": QColor(self.active_color),
                     "size": self.active_size, "style": self.active_style,
                     "fill_enabled": state.current_fill_enabled, "fill_color": QColor(state.current_fill_color),
-                    "path": QPainterPath(), "start": self.start_pos, "end": self.start_pos, "points": [], "locked": False
+                    "path": QPainterPath(), "start": self.start_pos, "end": self.start_pos, "points": [], "locked": False,
+                    "nib_angle": self.active_nib_angle
                 }
-                
-                if self.current_stroke["type"] in ["pen", "highlighter", "eraser", "laser_pen"]:
+                if self.current_stroke["type"] == "calligraphy":
+                    self.current_stroke["nib_angle"] = self.active_nib_angle
+
+                if self.current_stroke["type"] == "spray":
+                    self.current_stroke["points"].append((pos, pressure))
+                    self.spray_emit(pos, pressure)
+                    self.spray_timer.start()
+                elif self.current_stroke["type"] in ["pen", "highlighter", "eraser", "laser_pen", "curve", "calligraphy"]:
                     self.current_stroke["points"].append((pos, pressure))
                     rad = max(1.0, (self.active_size * pressure) / 2)
                     self.current_stroke["path"].addEllipse(pos, rad, rad)
@@ -754,6 +950,10 @@ class Canvas(QWidget):
                     self.snapped_shape["path"] = transform.map(self.base_snapped_path)
                 self.update(); return 
 
+            # --- MULTI-POINT POLYGON: live rubber-band line from last vertex to cursor ---
+            if self.active_tool == "tool_polygon" and self.current_stroke and self.current_stroke["type"] == "poly_path":
+                self.current_pos = pos; self.update(); return
+
             if self.selected_indices and not self.is_drawing and ("select" in self.active_tool or "cursor" in self.active_tool):
                 handles = self.get_handles(); h_cursor = Qt.ArrowCursor
                 if handles["tl"].contains(pos) or handles["br"].contains(pos): h_cursor = Qt.SizeFDiagCursor
@@ -792,6 +992,18 @@ class Canvas(QWidget):
                         self.current_stroke["points"].append((pos, pressure))
                         self.current_stroke["path"] = self.generate_variable_width_path(self.current_stroke["points"], self.active_size)
                         self.last_pos = pos
+                    elif self.current_stroke["type"] == "curve":
+                        self.current_stroke["points"].append((pos, pressure))
+                        self.current_stroke["path"] = self.generate_smooth_curve_path(self.current_stroke["points"], self.active_size)
+                        self.last_pos = pos
+                    elif self.current_stroke["type"] == "calligraphy":
+                        self.current_stroke["points"].append((pos, pressure))
+                        self.current_stroke["path"] = self.generate_calligraphy_path(self.current_stroke["points"], self.active_size, self.current_stroke.get("nib_angle", self.active_nib_angle))
+                        self.last_pos = pos
+                    elif self.current_stroke["type"] == "spray":
+                        self.current_stroke["points"].append((pos, pressure))
+                        self.last_spray_pos = pos; self.last_spray_pressure = pressure
+                        self.last_pos = pos
                     else: self.current_stroke["end"] = pos.toPoint()
                     self.update()
 
@@ -816,11 +1028,16 @@ class Canvas(QWidget):
                             self.is_internal_sync = False; self.update_selection_rect()
                     self.update(); return
 
-                if self.current_stroke:
+                if self.current_stroke and self.current_stroke["type"] != "poly_path":
+                    if self.current_stroke["type"] == "spray": self.spray_timer.stop()
+
                     final_stroke = self.current_stroke
                     if self.snapped_shape: final_stroke = self.snapped_shape; self.snapped_shape = None 
                     else:
                         if final_stroke["type"] in ["pen", "highlighter", "eraser", "laser_pen"]: final_stroke["path"] = self.generate_variable_width_path(final_stroke["points"], self.active_size)
+                        elif final_stroke["type"] == "curve": final_stroke["path"] = self.generate_smooth_curve_path(final_stroke["points"], self.active_size)
+                        elif final_stroke["type"] == "calligraphy": final_stroke["path"] = self.generate_calligraphy_path(final_stroke["points"], self.active_size, final_stroke.get("nib_angle", self.active_nib_angle))
+                        elif final_stroke["type"] == "spray": pass  # path was already built incrementally by spray_emit
                         else:
                             path = QPainterPath(); self.generate_shape_path(path, final_stroke["type"], final_stroke["start"], final_stroke["end"]); final_stroke["path"] = path
                     
@@ -880,6 +1097,53 @@ class Canvas(QWidget):
                 core_size = max(1.0, stroke["size"] * 0.3)
                 core_path = self.generate_variable_width_path(stroke["points"], core_size)
                 painter.setBrush(Qt.white); painter.drawPath(core_path)
+            return
+
+        if st_type == "spray":
+            # Path is a cloud of tiny filled circles built up by spray_emit; just paint it solid.
+            painter.setPen(Qt.NoPen); painter.setBrush(stroke["color"])
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            painter.drawPath(path)
+            return
+
+        if st_type in ("curve", "calligraphy"):
+            # Same "filled outline, no stroked pen" treatment as the regular pen tool.
+            painter.setPen(Qt.NoPen); painter.setBrush(stroke["color"])
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            painter.drawPath(path)
+            return
+
+        if st_type == "poly_path":
+            is_finished = path is not None and not path.isEmpty()
+            if is_finished:
+                pen = QPen(stroke["color"], stroke["size"], stroke.get("style", Qt.SolidLine), Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(pen); painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                painter.setBrush(stroke.get("fill_color", QColor(255, 200, 0, 100)) if stroke.get("fill_enabled", False) else Qt.NoBrush)
+                painter.drawPath(path)
+            elif is_live and stroke.get("points"):
+                # Still placing vertices: draw the committed edges + a dashed rubber-band to the cursor + vertex dots.
+                pts = stroke["points"]
+                pen = QPen(stroke["color"], stroke["size"], Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(pen); painter.setBrush(Qt.NoBrush); painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                if len(pts) > 1:
+                    live_path = QPainterPath(); live_path.moveTo(pts[0])
+                    for p in pts[1:]: live_path.lineTo(p)
+                    painter.drawPath(live_path)
+
+                # Magnetic close feedback: when the cursor is within snap range of the
+                # start vertex (and there are enough points to close), the rubber-band
+                # locks onto the start point and it grows so it's obvious it'll snap shut.
+                snap_radius = max(14, stroke["size"] * 2)
+                will_snap = len(pts) >= 3 and (self.current_pos - pts[0]).manhattanLength() <= snap_radius
+                cursor_target = pts[0] if will_snap else self.current_pos
+
+                rubber_pen = QPen(stroke["color"], max(1, stroke["size"] - 1), Qt.DashLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(rubber_pen)
+                painter.drawLine(pts[-1], cursor_target)
+                painter.setPen(Qt.NoPen); painter.setBrush(stroke["color"])
+                for p in pts[1:]: painter.drawEllipse(p, 4, 4)
+                start_radius = 8 if will_snap else 5
+                painter.setBrush(QColor("#44FF88")); painter.drawEllipse(pts[0], start_radius, start_radius)  # highlight start vertex
             return
 
         if st_type in ["pen", "highlighter", "eraser"] and stroke.get("style", Qt.SolidLine) == Qt.SolidLine:
@@ -1035,7 +1299,7 @@ class Canvas(QWidget):
             painter.setRenderHint(QPainter.Antialiasing)
             st_type = self.current_stroke["type"]
             
-            if st_type in ["pen", "highlighter", "eraser", "laser_pen", "image"]:
+            if st_type in ["pen", "highlighter", "eraser", "laser_pen", "image", "spray", "curve", "calligraphy", "poly_path"]:
                 self.draw_stroke_entity(painter, self.current_stroke)
             else:
                 temp_path = QPainterPath()

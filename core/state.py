@@ -67,7 +67,7 @@ class StateManager(QObject):
         self.current_fill_color = QColor(255, 200, 0, 100) 
         self.laser_duration = 2.0 
         
-        self.shape_tools = ["tool_line", "tool_arrow", "tool_rect", "tool_circle", "tool_polygon", "tool_star"]
+        self.shape_tools = ["tool_line", "tool_arrow", "tool_rect", "tool_circle", "tool_polygon", "tool_star", "tool_curve"]
         self.last_active_shape = "tool_line"
 
         default_mem = {"color": QColor("#6c5ce7"), "thickness": 3, "opacity": 255, "style": Qt.SolidLine, "fill_enabled": False}
@@ -80,9 +80,14 @@ class StateManager(QObject):
             "tool_eraser": { "color": QColor("white"), "thickness": 30, "opacity": 255, "style": Qt.SolidLine },
             "tool_laser": { "color": QColor("#FF0000"), "thickness": 6, "opacity": 255, "style": Qt.SolidLine },
 
+            # --- NEW FREEHAND TOOLS ---
+            "tool_spray":       { "color": QColor("#44CC88"), "thickness": 18, "opacity": 200, "style": Qt.SolidLine, "fill_enabled": False, "spray_density": 14 },
+            "tool_calligraphy": { "color": QColor("#222222"), "thickness": 8,  "opacity": 255, "style": Qt.SolidLine, "fill_enabled": False, "nib_angle": 45 },
+
             "tool_line":    default_mem.copy(), "tool_arrow":   default_mem.copy(),
             "tool_rect":    default_mem.copy(), "tool_circle":  default_mem.copy(),
             "tool_polygon": default_mem.copy(), "tool_star":    default_mem.copy(),
+            "tool_curve":   default_mem.copy(),
             "tool_cursor":  default_mem.copy(),
             "tool_select_rect": {}, "tool_select_lasso": {}, "tool_pan": {},
             "default": { "color": QColor("black"), "thickness": 2, "opacity": 255, "style": Qt.SolidLine, "fill_enabled": False }
@@ -243,6 +248,13 @@ class StateManager(QObject):
         if key == "group_shapes" and self.active_tool_id in self.shape_tools: return True
         if key == "set_eraser_stroke" and self.eraser_type == "stroke" and "eraser" in self.active_tool_id: return True
         if key == "set_eraser_pixel" and self.eraser_type == "pixel" and "eraser" in self.active_tool_id: return True
+
+        if key.startswith("set_spray_density_"):
+            try: return source_settings.get("spray_density", 14) == int(key.split("_")[-1])
+            except ValueError: return False
+        if key.startswith("set_nib_angle_"):
+            try: return source_settings.get("nib_angle", 45) == int(key.split("_")[-1])
+            except ValueError: return False
         
         if key in self.color_map:
             t = QColor(self.color_map[key]); t.setAlpha(255)
@@ -407,6 +419,22 @@ class StateManager(QObject):
                 elif "thickness" in self.current_settings:
                     self.current_settings["thickness"] = val
                     self.brush_changed.emit(val, self.current_opacity)
+            except ValueError: pass
+
+        elif action_key.startswith("set_spray_density_"):
+            try:
+                val = int(action_key.split("_")[-1])
+                if "spray_density" in self.current_settings:
+                    self.current_settings["spray_density"] = val
+                    self.pattern_changed.emit()  # cheap way to force a canvas repaint/refresh of dial badge
+            except ValueError: pass
+
+        elif action_key.startswith("set_nib_angle_"):
+            try:
+                val = int(action_key.split("_")[-1])
+                if "nib_angle" in self.current_settings:
+                    self.current_settings["nib_angle"] = val
+                    self.pattern_changed.emit()
             except ValueError: pass
         
         elif action_key.startswith("set_opacity_"):

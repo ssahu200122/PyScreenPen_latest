@@ -31,6 +31,8 @@ def create_menu_structure():
         MenuItem("Eraser", "eraser.png", QColor("white"), action_key="tool_eraser", submenu_id="eraser_settings", hide_label=True),
         MenuItem("Shapes", "shapes.png", QColor("white"), action_key="group_shapes", submenu_id="shapes_menu", hide_label=True),
         MenuItem("Text", "text.png", QColor("white"), action_key="tool_text", submenu_id="text_settings", hide_label=True),
+        MenuItem("Spray", "spray.png", QColor("#44CC88"), action_key="tool_spray", submenu_id="spray_settings", hide_label=True),
+        MenuItem("Calligraphy", "calligraphy.png", QColor("#222222"), action_key="tool_calligraphy", submenu_id="calligraphy_settings", hide_label=True),
     ]
     pages["root"] = MenuPage(root_items, center_icon="logo.png")
 
@@ -185,6 +187,7 @@ def create_menu_structure():
         MenuItem("Circle", "circle.png", QColor("white"), action_key="tool_circle", submenu_id="circle_settings", hide_label=True),
         MenuItem("Poly", "polygon.png", QColor("white"), action_key="tool_polygon", submenu_id="polygon_settings", hide_label=True),
         MenuItem("Star", "star.png", QColor("white"), action_key="tool_star", submenu_id="star_settings", hide_label=True),
+        MenuItem("Curve", "curve.png", QColor("white"), action_key="tool_curve", submenu_id="curve_settings", hide_label=True),
     ]
     pages["shapes_menu"] = MenuPage(shapes_items, center_icon="back.png")
 
@@ -220,7 +223,34 @@ def create_menu_structure():
     pages["circle_settings"] = MenuPage(create_shape_settings_items(), center_icon="circle.png")
     pages["polygon_settings"] = MenuPage(create_shape_settings_items(), center_icon="polygon.png")
     pages["star_settings"] = MenuPage(create_shape_settings_items(), center_icon="star.png")
+    pages["curve_settings"] = MenuPage(create_shape_settings_items(), center_icon="curve.png")
     pages["pen_settings"] = MenuPage(create_shape_settings_items(), center_icon="back.png")
+
+    # --- SPRAY / AIRBRUSH SETTINGS ---
+    spray_items = [
+        MenuItem("", None, submenu_id="green_shades", slice_color=QColor("#00CC66"), action_key="set_green", hide_label=True),
+        MenuItem("", None, submenu_id="blue_shades", slice_color=QColor("#4488FF"), action_key="set_blue", hide_label=True),
+        MenuItem("Opacity", "opacity.png", QColor("white"), submenu_id="opacity_dial", badge="200", hide_label=True),
+        MenuItem("Density", "pattern_dots.png", QColor("white"), submenu_id="spray_density_dial", badge="Dot+", hide_label=True),
+        MenuItem("Size", "thickness.png", QColor("white"), submenu_id="thickness_dial", badge="18", hide_label=True),
+        MenuItem("", None, submenu_id="red_shades", slice_color=QColor("#FF4444"), action_key="set_red", hide_label=True),
+        MenuItem("", None, submenu_id="black_shades", slice_color=QColor("#111111"), action_key="set_black", hide_label=True),
+    ]
+    pages["spray_settings"] = MenuPage(spray_items, center_icon="spray.png")
+    pages["spray_density_dial"] = MenuPage(items=[], page_type="dial", dial_range=(2, 40), dial_step=2, current_value=14, action_prefix="set_spray_density_", center_icon="back.png")
+
+    # --- CALLIGRAPHY PEN SETTINGS ---
+    calligraphy_items = [
+        MenuItem("", None, submenu_id="black_shades", slice_color=QColor("#111111"), action_key="set_black", hide_label=True),
+        MenuItem("", None, submenu_id="blue_shades", slice_color=QColor("#4488FF"), action_key="set_blue", hide_label=True),
+        MenuItem("Opacity", "opacity.png", QColor("white"), submenu_id="opacity_dial", badge="100", hide_label=True),
+        MenuItem("Nib Angle", "boarderstyle.png", QColor("white"), submenu_id="nib_angle_dial", badge="45°", hide_label=True),
+        MenuItem("Width", "thickness.png", QColor("white"), submenu_id="thickness_dial", badge="8", hide_label=True),
+        MenuItem("", None, submenu_id="red_shades", slice_color=QColor("#FF4444"), action_key="set_red", hide_label=True),
+        MenuItem("", None, submenu_id="purple_shades", slice_color=QColor("#9F55FF"), action_key="set_purple", hide_label=True),
+    ]
+    pages["calligraphy_settings"] = MenuPage(calligraphy_items, center_icon="calligraphy.png")
+    pages["nib_angle_dial"] = MenuPage(items=[], page_type="dial", dial_range=(0, 165), dial_step=15, current_value=45, action_prefix="set_nib_angle_", center_icon="back.png")
 
     text_items = [
         MenuItem("", None, submenu_id="red_shades", slice_color=QColor("#FF4444"), action_key="set_red", hide_label=True),     
