@@ -65,6 +65,7 @@ class Canvas(QWidget):
         self.current_stroke = None 
         
         self.active_tool = "tool_pen_1"
+        self.last_non_selection_tool = "tool_pen_1"
         self.active_color = state.current_color
         self.active_size = state.current_thickness
         self.active_opacity = state.current_opacity
@@ -83,6 +84,7 @@ class Canvas(QWidget):
         self.move_start_pos = QPointF()
         
         self.edit_btn_rect = None
+        self.done_btn_rect = None
         self.active_text_widget = None
         self.buffer_pixmap = None
         self.menu_ref = None 
@@ -278,8 +280,9 @@ class Canvas(QWidget):
             self.update_selection_rect(); self.redraw_buffer(); self.update()
 
     def update_selection_rect(self):
+        self._refresh_transparency()
         if not self.selected_indices:
-            self.selection_rect = QRectF(); self.selection_path = None; self.edit_btn_rect = None; return
+            self.selection_rect = QRectF(); self.selection_path = None; self.edit_btn_rect = None; self.done_btn_rect = None; return
         united_rect = QRectF()
         first = True
         for i in self.selected_indices:
@@ -296,6 +299,17 @@ class Canvas(QWidget):
         self.selection_path = QPainterPath(); self.selection_path.addRect(self.selection_rect)
         btn_size = 28
         self.edit_btn_rect = QRectF(self.selection_rect.right() - btn_size/2, self.selection_rect.top() - btn_size/2, btn_size, btn_size)
+        self.done_btn_rect = QRectF(self.selection_rect.left() - btn_size/2, self.selection_rect.top() - btn_size/2, btn_size, btn_size)
+
+    def _refresh_transparency(self):
+        """Keeps WA_TransparentForMouseEvents in sync with whether we actually need
+        to catch mouse input right now (selection active, or board/pattern showing).
+        Without this, tool_cursor stays click-through even with a selection, so taps
+        meant for handles/exit-selection leak straight through to the desktop/apps below."""
+        if self.active_tool not in ["tool_cursor", "tool_pan"]: return
+        is_board_active = state.board_color.alpha() > 0 or state.pattern_type != "none"
+        is_selecting = bool(self.selected_indices)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not is_board_active and not is_selecting)
 
     def import_image_from_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Import Image", "", "Images (*.png *.xpm *.jpg *.bmp *.jpeg)")
@@ -394,6 +408,7 @@ class Canvas(QWidget):
     def set_tool(self, tool_id):
         if "select" not in tool_id and "cursor" not in tool_id:
             self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False); self.update()
+            self.last_non_selection_tool = tool_id
 
         if tool_id in ["tool_pen_1", "tool_pen_2"]: self.last_pen_used = tool_id
 
@@ -413,7 +428,8 @@ class Canvas(QWidget):
         self.apply_custom_cursor(tool_id)
         
         is_board_active = state.board_color.alpha() > 0 or state.pattern_type != "none"
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, not is_board_active if tool_id in ["tool_cursor", "tool_pan"] else False)
+        is_selecting = bool(self.selected_indices)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, (not is_board_active and not is_selecting) if tool_id in ["tool_cursor", "tool_pan"] else False)
         self.update(); self.setFocus() 
 
     def set_color(self, color): 
@@ -586,10 +602,12 @@ class Canvas(QWidget):
         
         detected_path = QPainterPath(); shape_type = None
         
-        if linearity > 0.95:
+        if linearity > 0.9:
             shape_type = "line"; detected_path.moveTo(start); detected_path.lineTo(end)
         else:
-            approx_curve = cv2.approxPolyDP(points_array, 0.02 * perimeter, True) 
+            hull = cv2.convexHull(points_array)
+            hull_perimeter = cv2.arcLength(hull, True)
+            approx_curve = cv2.approxPolyDP(hull, 0.04 * hull_perimeter, True) 
             vertex_count = len(approx_curve)
             poly_qpoints = [QPointF(float(p[0][0]), float(p[0][1])) for p in approx_curve]
             
@@ -784,9 +802,31 @@ class Canvas(QWidget):
         pos = event.position(); pressure = event.pressure(); btns = event.buttons()
         if pressure == 0.0: pressure = 1.0 
         
-        if event.type() == QTabletEvent.TabletPress: self._handle_input(pos, pressure, "press", Qt.LeftButton if btns == Qt.NoButton else btns); event.accept()
+        if event.type() == QTabletEvent.TabletPress:
+            now = time.time()
+            last_t = getattr(self, "_last_tablet_press_time", 0.0)
+            last_pos = getattr(self, "_last_tablet_press_pos", None)
+            is_double_tap = (now - last_t) < 0.4 and last_pos is not None and (pos - last_pos).manhattanLength() < 25
+            self._last_tablet_press_time = now; self._last_tablet_press_pos = pos
+
+            if is_double_tap and self.try_exit_selection_mode(pos):
+                self._last_tablet_press_time = 0.0; event.accept(); return
+
+            self._handle_input(pos, pressure, "press", Qt.LeftButton if btns == Qt.NoButton else btns); event.accept()
         elif event.type() == QTabletEvent.TabletMove: self._handle_input(pos, pressure, "move", btns); event.accept()
         elif event.type() == QTabletEvent.TabletRelease: self._handle_input(pos, pressure, "release", btns); event.accept()
+
+    def try_exit_selection_mode(self, pos):
+        """If something is selected and `pos` isn't on the selection or a handle,
+        drop out of selection mode back to whatever tool was active before.
+        Returns True if it exited (caller should swallow the event)."""
+        if not (("select" in self.active_tool or "cursor" in self.active_tool) and self.selected_indices):
+            return False
+        if self.selection_rect.contains(pos): return False
+        for key, rect in self.get_handles().items():
+            if rect.contains(pos): return False
+        state.set_active_tool(getattr(self, "last_non_selection_tool", "tool_pen_1"))
+        return True
 
     def mousePressEvent(self, event): self._handle_input(event.position(), 1.0, "press", event.button())
     def mouseMoveEvent(self, event): self._handle_input(event.position(), 1.0, "move", event.buttons())
@@ -794,6 +834,9 @@ class Canvas(QWidget):
     def mouseDoubleClickEvent(self, event):
         if self.active_tool == "tool_polygon" and self.current_stroke and self.current_stroke["type"] == "poly_path":
             self.finalize_polygon(); return
+
+        if self.try_exit_selection_mode(event.position()): return
+
         self._handle_input(event.position(), 1.0, "press", event.button())
 
     def finalize_polygon(self):
@@ -807,10 +850,20 @@ class Canvas(QWidget):
         poly = QPolygonF(pts); poly.append(pts[0])
         path = QPainterPath(); path.addPolygon(poly); path.closeSubpath()
         self.current_stroke["path"] = path
-        self.strokes.append(self.current_stroke)
+        final_stroke = self.current_stroke
+        self.strokes.append(final_stroke)
         painter = QPainter(self.buffer_pixmap); painter.setRenderHint(QPainter.Antialiasing)
-        self.draw_stroke_entity(painter, self.current_stroke); painter.end()
+        self.draw_stroke_entity(painter, final_stroke); painter.end()
         self.current_stroke = None
+        self.update()
+
+        new_idx = len(self.strokes) - 1
+        state.set_active_tool("tool_cursor")
+        self.selected_indices = [new_idx]
+        self.update_selection_rect(); state.set_selection_active(True)
+        self.is_internal_sync = True
+        state.sync_tool_properties(color=final_stroke.get("color", QColor("black")), thickness=final_stroke.get("size", 2), style=final_stroke.get("style", Qt.SolidLine), is_filled=final_stroke.get("fill_enabled", False), fill_color=final_stroke.get("fill_color", state.current_fill_color))
+        self.is_internal_sync = False
         self.update()
 
     def cancel_polygon(self):
@@ -840,6 +893,10 @@ class Canvas(QWidget):
                             return
 
                 if self.edit_btn_rect and self.edit_btn_rect.contains(pos): state.request_menu_context.emit("selection_context"); return
+                if self.done_btn_rect and self.done_btn_rect.contains(pos):
+                    self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False)
+                    state.set_active_tool(getattr(self, "last_non_selection_tool", "tool_pen_1"))
+                    return
                 if self.menu_ref and self.menu_ref.geometry().contains(pos.toPoint()): return 
                 
                 if self.active_tool == "tool_text":
@@ -853,9 +910,12 @@ class Canvas(QWidget):
 
                 if "select" in self.active_tool or "cursor" in self.active_tool:
                     if self.selected_indices and self.selection_rect.contains(pos): self.is_moving_selection = True; self.move_start_pos = pos; return
+                    had_selection = bool(self.selected_indices)
                     self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False)
                     if self.active_tool == "tool_select_lasso": self.selection_path = QPainterPath(); self.selection_path.moveTo(pos)
                     elif self.active_tool == "tool_select_rect": self.selection_path = QPainterPath() 
+                    if had_selection and self.active_tool == "tool_cursor":
+                        state.set_active_tool(getattr(self, "last_non_selection_tool", "tool_pen_1")); return
                     self.update(); return 
 
                 if "eraser" in self.active_tool and state.eraser_type == "stroke":
@@ -1008,7 +1068,10 @@ class Canvas(QWidget):
                     self.update()
 
         elif event_type == "release":
+            was_transforming = self.transform_mode is not None
             self.shape_hold_timer.stop(); self.is_scaling_shape = False; self.transform_mode = None; self.active_handle = None
+            if was_transforming:
+                self.redraw_buffer(); self.update_selection_rect(); self.update(); return
             
             if self.is_drawing:
                 self.is_drawing = False
@@ -1047,8 +1110,19 @@ class Canvas(QWidget):
                     self.draw_stroke_entity(painter, final_stroke); painter.end()
                     self.current_stroke = None; self.update()
 
+                    if final_stroke["type"] in ["line", "arrow", "rect", "circle", "star", "curve", "triangle"]:
+                        new_idx = len(self.strokes) - 1
+                        state.set_active_tool("tool_cursor")
+                        self.selected_indices = [new_idx]
+                        self.update_selection_rect(); state.set_selection_active(True)
+                        self.is_internal_sync = True
+                        state.sync_tool_properties(color=final_stroke.get("color", QColor("black")), thickness=final_stroke.get("size", 2), style=final_stroke.get("style", Qt.SolidLine), is_filled=final_stroke.get("fill_enabled", False), fill_color=final_stroke.get("fill_color", state.current_fill_color))
+                        self.is_internal_sync = False
+                        self.update()
+
     def draw_selection_overlay(self, painter):
         if not self.selected_indices: return
+        if self.is_moving_selection or self.transform_mode: return  # hide the box/handles while actively dragging/rotating/scaling
         border_color = QColor("#FF4444") if any(self.strokes[i].get("locked", False) for i in self.selected_indices) else self.theme_border
         
         painter.setPen(QPen(border_color, 2, Qt.DashLine if "select" in self.active_tool else Qt.SolidLine))
@@ -1066,6 +1140,20 @@ class Canvas(QWidget):
             if os.path.exists(icon_path):
                 pix = QPixmap(icon_path).scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 painter.drawPixmap(QRectF(self.edit_btn_rect.center().x()-8, self.edit_btn_rect.center().y()-8, 16, 16).toRect(), pix)
+
+        if self.done_btn_rect:
+            painter.setBrush(QColor("#22C55E")); painter.setPen(QPen(Qt.white, 2)); painter.drawEllipse(self.done_btn_rect)
+            done_icon_path = get_asset_path("done.png")
+            if os.path.exists(done_icon_path):
+                pix = QPixmap(done_icon_path).scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                painter.drawPixmap(QRectF(self.done_btn_rect.center().x()-8, self.done_btn_rect.center().y()-8, 16, 16).toRect(), pix)
+            else:
+                # No dedicated icon shipped - draw a simple checkmark so the button is still legible.
+                c = self.done_btn_rect.center()
+                check_pen = QPen(Qt.white, 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(check_pen)
+                painter.drawLine(QPointF(c.x()-6, c.y()), QPointF(c.x()-2, c.y()+5))
+                painter.drawLine(QPointF(c.x()-2, c.y()+5), QPointF(c.x()+7, c.y()-6))
 
     def draw_stroke_entity(self, painter, stroke):
         st_type = stroke["type"]
