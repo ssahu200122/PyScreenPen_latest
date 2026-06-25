@@ -596,13 +596,13 @@ class Canvas(QWidget):
         
         points_array = np.array([[p.x(), p.y()] for p in self.current_points], dtype=np.int32)
         start = self.current_points[0]; end = self.current_points[-1]
-        perimeter = cv2.arcLength(points_array, True) 
+        perimeter = cv2.arcLength(points_array, False) 
         if perimeter == 0: return
         linearity = math.hypot(end.x() - start.x(), end.y() - start.y()) / perimeter
         
         detected_path = QPainterPath(); shape_type = None
         
-        if linearity > 0.95:
+        if linearity > 0.9:
             shape_type = "line"; detected_path.moveTo(start); detected_path.lineTo(end)
         else:
             hull = cv2.convexHull(points_array)
