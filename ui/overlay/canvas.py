@@ -1068,7 +1068,10 @@ class Canvas(QWidget):
                     self.update()
 
         elif event_type == "release":
+            was_transforming = self.transform_mode is not None
             self.shape_hold_timer.stop(); self.is_scaling_shape = False; self.transform_mode = None; self.active_handle = None
+            if was_transforming:
+                self.redraw_buffer(); self.update_selection_rect(); self.update(); return
             
             if self.is_drawing:
                 self.is_drawing = False
@@ -1119,6 +1122,7 @@ class Canvas(QWidget):
 
     def draw_selection_overlay(self, painter):
         if not self.selected_indices: return
+        if self.is_moving_selection or self.transform_mode: return  # hide the box/handles while actively dragging/rotating/scaling
         border_color = QColor("#FF4444") if any(self.strokes[i].get("locked", False) for i in self.selected_indices) else self.theme_border
         
         painter.setPen(QPen(border_color, 2, Qt.DashLine if "select" in self.active_tool else Qt.SolidLine))
