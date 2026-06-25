@@ -8,7 +8,7 @@ appdata_dir = os.path.join(os.getenv('APPDATA'), 'PyScreenPen')
 os.makedirs(appdata_dir, exist_ok=True)
 SETTINGS_PATH = os.path.join(appdata_dir, 'settings.json')
 # -----------------------------
-
+# demmo
 class StateManager(QObject):
     # --- SIGNALS ---
     tool_changed = Signal(str)          
