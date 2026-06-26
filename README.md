@@ -9,6 +9,7 @@ It's built with **PySide6 (Qt for Python)** and is controlled through a custom r
 ## Table of Contents
 
 - [Features](#features)
+- [Project Showcase](#project-showcase)
 - [Download](#download)
 - [Architecture](#architecture)
   - [High-level overview](#high-level-overview)
@@ -30,6 +31,7 @@ It's built with **PySide6 (Qt for Python)** and is controlled through a custom r
   - [2. Build the Windows installer (Inno Setup)](#2-build-the-windows-installer-inno-setup)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Known Limitations / Roadmap](#known-limitations--roadmap)
+- [About the Developer](#about-the-developer)
 
 ---
 
@@ -47,6 +49,30 @@ It's built with **PySide6 (Qt for Python)** and is controlled through a custom r
 - **Single-instance toggle** — relaunching the app while it's running simply shows/hides it instead of opening a second copy.
 - **Configurable global hotkeys** — rebindable via the in-app Settings window, persisted to disk.
 - **Undo/redo**, vanishing/timed strokes (for laser-style emphasis), and a "clear canvas" action.
+
+## Project Showcase
+
+**The annotation overlay in action** — freehand pen strokes, a shape, and inserted text, all floating live over the desktop and another application window, with the radial menu open and a star shape selected for editing:
+
+![PyScreenPen drawing over the desktop](screenshots/in-action-desktop-demo.png)
+
+**The radial tool menu** — the root menu (left) and a sample of its nested tool-settings pages, each reached by drilling into a wedge:
+
+| Root menu | Spray settings | Eraser / undo |
+|---|---|---|
+| ![Root radial menu](screenshots/radial-menu-root.png) | ![Spray tool settings](screenshots/spray-tool-menu.png) | ![Eraser menu](screenshots/eraser-menu.png) |
+
+| Stroke style | Thickness dial | Fill color |
+|---|---|---|
+| ![Line style menu](screenshots/line-style-menu.png) | ![Thickness dial](screenshots/thickness-dial.png) | ![Fill color menu](screenshots/fill-color-menu.png) |
+
+| Shape fill options | Text style | Color shades |
+|---|---|---|
+| ![Shapes fill menu](screenshots/shapes-fill-menu.png) | ![Text style menu](screenshots/text-style-menu.png) | ![Pink/red color shades](screenshots/pink-red-color-shades.png) |
+
+**Settings window** — rebindable global shortcuts and app preferences:
+
+![Settings window](screenshots/settings-window.png)
 
 ## Download
 
@@ -301,3 +327,11 @@ In-canvas (not rebindable): `B` swap pen 1/2, `E` toggle eraser, `H` highlighter
 - **Windows only** — the single-instance mechanism, `%APPDATA%` settings path, tray/installer tooling, and global-hotkey library are all Windows-specific.
 - **Infinite canvas + zoom** — not yet implemented; the canvas is currently a fixed, screen-sized surface.
 - **Multi-page canvases** — not yet implemented; everything lives on one drawing surface per session.
+
+---
+
+## About the Developer
+
+**Sourabh**
+GitHub: [ssahu200122](https://github.com/ssahu200122)
+
