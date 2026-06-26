@@ -1,6 +1,8 @@
 from PySide6.QtGui import QColor
 
 class MenuItem:
+    NEUTRAL_SLICE = QColor("#2B2E36")
+
     def __init__(self, label: str, icon_filename: str, 
                  highlight_color: QColor = QColor("white"), 
                  action_key: str = None, submenu_id: str = None,
@@ -8,9 +10,29 @@ class MenuItem:
         self.label = label; self.icon_filename = icon_filename 
         self.highlight_color = highlight_color; self.action_key = action_key
         self.submenu_id = submenu_id; self.badge = badge; self.hide_label = hide_label
-        if slice_color: self.slice_color = slice_color
-        else: self.slice_color = QColor("#2B2E36") 
-        self.rim_color = QColor("#202227")   
+        if slice_color:
+            self.slice_color = slice_color
+        elif self._is_category_color(highlight_color):
+            self.slice_color = self._derive_category_slice(highlight_color)
+        else:
+            self.slice_color = self.NEUTRAL_SLICE
+        self.rim_color = QColor("#202227")
+
+    @staticmethod
+    def _is_category_color(color: QColor) -> bool:
+        # White/near-white highlight = "neutral utility" item, not a real category.
+        return not (color.red() > 230 and color.green() > 230 and color.blue() > 230)
+
+    @staticmethod
+    def _derive_category_slice(color: QColor) -> QColor:
+        # Blend the tool's accent color into the neutral slice base so the
+        # wheel still reads as one cohesive dark UI, just tinted per-category.
+        base = MenuItem.NEUTRAL_SLICE
+        blend = 0.38  # how much category color shows through
+        r = int(base.red()   * (1 - blend) + color.red()   * blend)
+        g = int(base.green() * (1 - blend) + color.green() * blend)
+        b = int(base.blue()  * (1 - blend) + color.blue()  * blend)
+        return QColor(r, g, b)
 
 class MenuPage:
     def __init__(self, items: list[MenuItem] = [], center_icon="logo.png", 

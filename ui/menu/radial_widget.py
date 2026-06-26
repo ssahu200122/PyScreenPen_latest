@@ -17,13 +17,13 @@ class DrawboardMenu(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
-        self.setFixedSize(340, 340) 
-        self.center = QPoint(170, 170)
+        self.setFixedSize(360, 360) 
+        self.center = QPoint(180, 180)
 
 
-        self.base_inner_radius = 30    
-        self.base_rim_radius = 90      
-        self.base_outer_radius = 120   
+        self.base_inner_radius = 38    
+        self.base_rim_radius = 98      
+        self.base_outer_radius = 130   
 
         self.pages = create_menu_structure()
 
@@ -74,7 +74,7 @@ class DrawboardMenu(QWidget):
                 background-color: #ff6b81;
             }
         """)
-        # Perfect math for the top-right edge of a 120px radius circle inside a 340px widget
+        # Perfect math for the top-right edge of the outer-radius circle inside the widget
         # Force the button to calculate its correct starting position based on the initial expansion state
         self.set_expansion(0.0)
         self.close_btn.clicked.connect(lambda: QApplication.instance().quit())
@@ -97,11 +97,18 @@ class DrawboardMenu(QWidget):
                 self.current_page_id = "selection_context"
                 self.history_stack = []
                 self.update()
+            if state.active_tool_id != "tool_select_lasso":
+                self._tool_before_edit = state.active_tool_id
+                state.set_active_tool("tool_select_lasso")
         else:
             if self.current_page_id == "selection_context":
                 self.current_page_id = "root"
                 self.history_stack = []
                 self.update()
+            prev = getattr(self, "_tool_before_edit", None)
+            if prev:
+                state.set_active_tool(prev)
+                self._tool_before_edit = None
 
     def open_with_context(self, context_id):
         if context_id == "selection_context" and not state.has_selection:
@@ -128,9 +135,9 @@ class DrawboardMenu(QWidget):
             # Find the 45-degree angle coordinate (0.7071 is sin/cos of 45 deg)
             offset = cur_out * 0.7071
             
-            # Center of widget is 170, 170. Subtract 10 to center the 20x20 button.
-            btn_x = 170 + offset - 10
-            btn_y = 170 - offset - 10
+            # Center on self.center (subtract 10 to center the 20x20 button).
+            btn_x = self.center.x() + offset - 10
+            btn_y = self.center.y() - offset - 10
             
             self.close_btn.move(int(btn_x), int(btn_y))
             self.close_btn.setVisible(True) # Keep it visible at all times
@@ -301,10 +308,23 @@ class DrawboardMenu(QWidget):
                         painter.save(); painter.translate(ax, ay); painter.rotate(-mid); painter.setPen(QPen(QColor("#777777"), 2))
                         painter.drawLine(0, -4, 4, 0); painter.drawLine(4, 0, 0, 4); painter.restore()
 
-                    if is_active and self._expansion > 0.9:
-                        painter.setPen(QPen(QColor("white"), 5)); painter.setBrush(Qt.NoBrush)
-                        rect_active = QRectF(self.center.x()-cur_rim+3, self.center.y()-cur_rim+3, cur_rim*2-6, cur_rim*2-6)
-                        painter.drawArc(rect_active, int(start_angle*16), int(angle_span*16))
+                    if is_active and self._expansion > 0.3:
+                        ring_col = QColor(item.highlight_color)
+                        # Calligraphy etc. use near-black highlight colors as icon tint,
+                        # not a usable ring color — fall back to a clean white ring then.
+                        if ring_col.lightness() < 90:
+                            ring_col = QColor("white")
+                        pen_w = 4
+                        ring_rect = QRectF(
+                            self.center.x() - cur_rim + pen_w/2, self.center.y() - cur_rim + pen_w/2,
+                            (cur_rim - pen_w/2) * 2, (cur_rim - pen_w/2) * 2
+                        )
+                        painter.setPen(QPen(ring_col, pen_w)); painter.setBrush(Qt.NoBrush)
+                        painter.drawArc(ring_rect, int(start_angle * 16), int(angle_span * 16))
+                        # Soft glow just outside the ring for extra "active" pop
+                        glow_pen = QPen(QColor(ring_col.red(), ring_col.green(), ring_col.blue(), 70), 8)
+                        painter.setPen(glow_pen)
+                        painter.drawArc(ring_rect, int(start_angle * 16), int(angle_span * 16))
 
                     if self._expansion > 0.6:
                         label_r = (self.base_inner_radius + cur_rim) / 2
@@ -334,7 +354,21 @@ class DrawboardMenu(QWidget):
         painter.setBrush(QBrush(c_grad)); painter.setPen(QPen(QColor("#444444"), 5))
         painter.drawEllipse(self.center, self.base_inner_radius, self.base_inner_radius)
         center_pix = self.get_icon(page.center_icon)
-        if center_pix:
+        hovered_item = None
+        if getattr(page, "page_type", "slices") != "dial" and 0 <= self.hovered_index < len(page.items):
+            hovered_item = page.items[self.hovered_index]
+
+        if hovered_item and hovered_item.label and self._expansion > 0.5:
+            # Tooltip text takes over the hub in place of the icon while hovering,
+            # so it's always legible regardless of icon vs. label items.
+            painter.setPen(Qt.white)
+            font = QFont("Arial", 9, QFont.Bold)
+            painter.setFont(font)
+            text_rect = QRectF(self.center.x() - self.base_inner_radius + 4,
+                                self.center.y() - self.base_inner_radius + 4,
+                                (self.base_inner_radius - 4) * 2, (self.base_inner_radius - 4) * 2)
+            painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, hovered_item.label)
+        elif center_pix:
             sz = 26; rect = QRectF(self.center.x()-sz/2, self.center.y()-sz/2, sz, sz)
             self.paint_icon_colored(painter, rect, center_pix, QColor("#EEEEEE"))
         painter.end()
@@ -361,6 +395,26 @@ class DrawboardMenu(QWidget):
             if count == 0: return (-1, None)
             index = int(angle / (360 / count))
             return (index, zone)
+
+    def clamp_to_screen(self, pos):
+        """Keep at least most of the widget within the screen that contains it,
+        so dragging can never lose the menu off the edge entirely."""
+        screen = QApplication.screenAt(pos + QPoint(self.width() // 2, self.height() // 2))
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+
+        # Allow a small overhang (so the hub can still nudge up to the edge)
+        # but never let the whole widget leave the visible area.
+        overhang = self.base_outer_radius  # keep at least the dial circle visible
+        min_x = geo.left() - (self.width() - overhang)
+        max_x = geo.right() - overhang
+        min_y = geo.top() - (self.height() - overhang)
+        max_y = geo.bottom() - overhang
+
+        x = max(min_x, min(pos.x(), max_x))
+        y = max(min_y, min(pos.y(), max_y))
+        return QPoint(int(x), int(y))
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton: return
@@ -402,7 +456,8 @@ class DrawboardMenu(QWidget):
             global_pos = event.globalPosition().toPoint()
             if (global_pos - self.drag_start_pos).manhattanLength() > 5:
                 self.has_moved = True
-                self.move(self.pos() + global_pos - self.drag_start_pos)
+                new_pos = self.pos() + global_pos - self.drag_start_pos
+                self.move(self.clamp_to_screen(new_pos))
                 self.drag_start_pos = global_pos
                 self.geometry_changed.emit() 
             return

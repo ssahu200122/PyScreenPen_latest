@@ -238,7 +238,10 @@ class Canvas(QWidget):
     def redraw_buffer(self):
         self.buffer_pixmap.fill(Qt.transparent)
         painter = QPainter(self.buffer_pixmap); painter.setRenderHint(QPainter.Antialiasing)
-        for stroke in self.strokes: self.draw_stroke_entity(painter, stroke)
+        skip = set(self.selected_indices) if (self.transform_mode or self.is_moving_selection) else set()
+        for i, stroke in enumerate(self.strokes):
+            if i in skip: continue
+            self.draw_stroke_entity(painter, stroke)
         painter.end()
 
     def resizeEvent(self, event):
@@ -254,14 +257,10 @@ class Canvas(QWidget):
     def update_background(self, color): self.update()
 
     def on_pattern_changed(self):
-        """Called whenever pattern type or settings change.
-        Refreshes both the visual and the mouse-transparency attribute so
-        the overlay captures clicks when a pattern background is active."""
-        is_board_active = state.board_color.alpha() > 0 or state.pattern_type != "none"
-        self.setAttribute(
-            Qt.WA_TransparentForMouseEvents,
-            not is_board_active if self.active_tool in ["tool_cursor", "tool_pan"] else False
-        )
+        """Called whenever pattern type or settings change. Refreshes both the visual
+        and the mouse-transparency attribute so the overlay captures clicks when a
+        pattern background is active."""
+        self._refresh_transparency()
         self.update()
     
     def update_fill_color_selection(self, color):
@@ -305,11 +304,20 @@ class Canvas(QWidget):
         """Keeps WA_TransparentForMouseEvents in sync with whether we actually need
         to catch mouse input right now (selection active, or board/pattern showing).
         Without this, tool_cursor stays click-through even with a selection, so taps
-        meant for handles/exit-selection leak straight through to the desktop/apps below."""
-        if self.active_tool not in ["tool_cursor", "tool_pan"]: return
+        meant for handles/exit-selection leak straight through to the desktop/apps below.
+
+        Only calls setAttribute when the value actually needs to change. This method
+        runs on every mouse-move during a drag/rotate/scale (via update_selection_rect),
+        and repeatedly toggling a top-level window's click-through style at that frequency
+        can cause the OS compositor to briefly mis-route input/paint to whatever's behind
+        this overlay - which is what caused background apps like VS Code to receive our
+        clicks and select text while dragging."""
+        if self.active_tool not in ["tool_cursor", "tool_pan", "tool_select_lasso", "tool_select_rect"]: return
         is_board_active = state.board_color.alpha() > 0 or state.pattern_type != "none"
-        is_selecting = bool(self.selected_indices)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, not is_board_active and not is_selecting)
+        is_edit_mode = self.active_tool in ["tool_cursor", "tool_select_lasso", "tool_select_rect"]
+        should_be_transparent = not is_board_active and not is_edit_mode
+        if self.testAttribute(Qt.WA_TransparentForMouseEvents) != should_be_transparent:
+            self.setAttribute(Qt.WA_TransparentForMouseEvents, should_be_transparent)
 
     def import_image_from_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Import Image", "", "Images (*.png *.xpm *.jpg *.bmp *.jpeg)")
@@ -428,8 +436,11 @@ class Canvas(QWidget):
         self.apply_custom_cursor(tool_id)
         
         is_board_active = state.board_color.alpha() > 0 or state.pattern_type != "none"
-        is_selecting = bool(self.selected_indices)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, (not is_board_active and not is_selecting) if tool_id in ["tool_cursor", "tool_pan"] else False)
+        if tool_id in ["tool_cursor", "tool_select_lasso", "tool_select_rect"]: should_be_transparent = False
+        elif tool_id == "tool_pan": should_be_transparent = not is_board_active
+        else: should_be_transparent = False
+        if self.testAttribute(Qt.WA_TransparentForMouseEvents) != should_be_transparent:
+            self.setAttribute(Qt.WA_TransparentForMouseEvents, should_be_transparent)
         self.update(); self.setFocus() 
 
     def set_color(self, color): 
@@ -813,8 +824,8 @@ class Canvas(QWidget):
                 self._last_tablet_press_time = 0.0; event.accept(); return
 
             self._handle_input(pos, pressure, "press", Qt.LeftButton if btns == Qt.NoButton else btns); event.accept()
-        elif event.type() == QTabletEvent.TabletMove: self._handle_input(pos, pressure, "move", btns); event.accept()
-        elif event.type() == QTabletEvent.TabletRelease: self._handle_input(pos, pressure, "release", btns); event.accept()
+        elif event.type() == QTabletEvent.TabletMove: self._handle_input(pos, pressure, "move", Qt.LeftButton if btns == Qt.NoButton else btns); event.accept()
+        elif event.type() == QTabletEvent.TabletRelease: self._handle_input(pos, pressure, "release", Qt.LeftButton if btns == Qt.NoButton else btns); event.accept()
 
     def try_exit_selection_mode(self, pos):
         """If something is selected and `pos` isn't on the selection or a handle,
@@ -858,8 +869,8 @@ class Canvas(QWidget):
         self.update()
 
         new_idx = len(self.strokes) - 1
-        state.set_active_tool("tool_cursor")
         self.selected_indices = [new_idx]
+        state.set_active_tool("tool_cursor")
         self.update_selection_rect(); state.set_selection_active(True)
         self.is_internal_sync = True
         state.sync_tool_properties(color=final_stroke.get("color", QColor("black")), thickness=final_stroke.get("size", 2), style=final_stroke.get("style", Qt.SolidLine), is_filled=final_stroke.get("fill_enabled", False), fill_color=final_stroke.get("fill_color", state.current_fill_color))
@@ -890,6 +901,7 @@ class Canvas(QWidget):
                                     stroke["path"] = QPainterPath(self.strokes[self.selected_indices[k]]["path"])
                                     stroke["transform"] = QTransform(self.strokes[self.selected_indices[k]]["transform"])
                                 elif stroke["type"] != "text": stroke["path"] = QPainterPath(self.strokes[self.selected_indices[k]]["path"])
+                            self.redraw_buffer(); self.update()
                             return
 
                 if self.edit_btn_rect and self.edit_btn_rect.contains(pos): state.request_menu_context.emit("selection_context"); return
@@ -909,7 +921,9 @@ class Canvas(QWidget):
                 self.snapped_shape = None; self.is_scaling_shape = False; self.shape_hold_timer.stop()
 
                 if "select" in self.active_tool or "cursor" in self.active_tool:
-                    if self.selected_indices and self.selection_rect.contains(pos): self.is_moving_selection = True; self.move_start_pos = pos; return
+                    if self.selected_indices and self.selection_rect.contains(pos):
+                        self.is_moving_selection = True; self.move_start_pos = pos
+                        self.redraw_buffer(); self.update(); return
                     had_selection = bool(self.selected_indices)
                     self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False)
                     if self.active_tool == "tool_select_lasso": self.selection_path = QPainterPath(); self.selection_path.moveTo(pos)
@@ -995,7 +1009,7 @@ class Canvas(QWidget):
                         self.strokes[real_idx]["path"] = transform.map(orig_stroke["path"])
                         if "points" in orig_stroke and orig_stroke["points"]: self.strokes[real_idx]["points"] = [(transform.map(pt), press) for pt, press in orig_stroke["points"]]
 
-                self.update_selection_rect(); self.redraw_buffer(); self.update(); return
+                self.update_selection_rect(); self.update(); return
 
             if self.is_scaling_shape and self.snapped_shape:
                 if self.snapped_shape["shape_type"] == "line":
@@ -1036,7 +1050,7 @@ class Canvas(QWidget):
                 if (pos - self.last_pos).manhattanLength() < 2.0: return
                 
                 if "select" in self.active_tool or "cursor" in self.active_tool:
-                    if self.is_moving_selection: self.move_selection(pos - self.move_start_pos); self.move_start_pos = pos; self.redraw_buffer()
+                    if self.is_moving_selection: self.move_selection(pos - self.move_start_pos); self.move_start_pos = pos
                     else:
                         if self.active_tool == "tool_select_rect" and self.selection_path is not None: 
                             self.selection_path = QPainterPath(); self.selection_path.addRect(QRectF(self.start_pos, pos).normalized())
@@ -1079,6 +1093,7 @@ class Canvas(QWidget):
                     if self.is_moving_selection:
                         self.is_moving_selection = False
                         if self.active_tool == "tool_select_lasso" and self.selection_path is not None: self.selection_path.closeSubpath()
+                        self.redraw_buffer()
                     else:
                         if self.active_tool == "tool_select_lasso" and self.selection_path is not None: self.selection_path.closeSubpath()
                         if self.selection_path is not None: self.find_selected_strokes()
@@ -1380,7 +1395,14 @@ class Canvas(QWidget):
             painter.drawPixmap(target_rect, self.buffer_pixmap, self.buffer_pixmap.rect())
         
         # 4. Draw Live Previews (snapping shape, current stroke, selection box)
-        if self.snapped_shape:
+        if self.transform_mode or self.is_moving_selection:
+            # Selected strokes are excluded from buffer_pixmap while transforming/moving
+            # (see redraw_buffer); paint just those few live instead of
+            # rebuilding the whole canvas buffer on every mouse-move.
+            painter.setRenderHint(QPainter.Antialiasing)
+            for idx in self.selected_indices:
+                self.draw_stroke_entity(painter, self.strokes[idx])
+        elif self.snapped_shape:
             painter.setRenderHint(QPainter.Antialiasing)
             self.draw_stroke_entity(painter, self.snapped_shape)
         elif self.current_stroke:
