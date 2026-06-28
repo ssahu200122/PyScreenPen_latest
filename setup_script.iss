@@ -2,7 +2,7 @@
 ; --- General Info ---
 AppName=PyScreen Pen
 AppVersion=1.0.0
-AppPublisher=Saurav
+AppPublisher=Sourabh sahu
 DefaultDirName={autopf}\PyScreenPen
 DefaultGroupName=PyScreenPen
 
