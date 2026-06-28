@@ -123,6 +123,17 @@ class DrawboardMenu(QWidget):
 
     def get_expansion(self): return self._expansion
 
+    def occupied_region(self):
+        """Returns (global_center: QPoint, radius: float) describing the menu's
+        actual current visible/interactive footprint - a circle, not the
+        widget's square bounding box. Used by Canvas so drawing right next to
+        the menu (but outside the visible pie) isn't blocked."""
+        cur_out = self.base_inner_radius + (self.base_outer_radius - self.base_inner_radius) * self._expansion
+        # Small padding so edge-grazing strokes near the rim still feel intentional.
+        radius = cur_out + 6
+        global_center = self.mapToGlobal(self.center)
+        return global_center, radius
+
     def set_expansion(self, val):
         self._expansion = val
         self.update()

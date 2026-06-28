@@ -60,7 +60,8 @@ class Canvas(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
         
         self.strokes = []       
-        self.redo_stack = [] 
+        self.undo_stack = []    # list of deep-copied self.strokes snapshots, oldest first
+        self.redo_stack = []    # snapshots popped off undo_stack, for action_redo
         self.clipboard = []              
         self.current_stroke = None 
         
@@ -219,6 +220,46 @@ class Canvas(QWidget):
 
     def set_menu_ref(self, menu): self.menu_ref = menu
 
+    def _deep_copy_stroke(self, stroke):
+        """Copies a stroke dict including its mutable Qt members (QPainterPath,
+        QTransform, point lists) so a stored undo snapshot can't be silently
+        mutated later by further edits to the live stroke."""
+        s = stroke.copy()
+        if "path" in s and s["path"] is not None: s["path"] = QPainterPath(s["path"])
+        if "transform" in s and s["transform"] is not None: s["transform"] = QTransform(s["transform"])
+        if "pos" in s and s["pos"] is not None:
+            try: s["pos"] = QPointF(s["pos"])
+            except TypeError: pass  # some 'pos' values are QPoint, copy ctor still applies
+        if "color" in s and s["color"] is not None: s["color"] = QColor(s["color"])
+        if "fill_color" in s and s["fill_color"] is not None: s["fill_color"] = QColor(s["fill_color"])
+        if "points" in s and s["points"]: s["points"] = [(QPointF(p), pr) for p, pr in s["points"]]
+        return s
+
+    def _snapshot_strokes(self):
+        return [self._deep_copy_stroke(s) for s in self.strokes]
+
+    def push_undo_snapshot(self):
+        """Call this BEFORE any operation that adds, removes, or mutates strokes
+        (drawing, erasing, deleting, moving, rotating, scaling, recoloring,
+        restyling, locking, duplicating, pasting, clearing). Stores the
+        pre-operation state so action_undo can restore it exactly, regardless
+        of which tool or action caused the change."""
+        self.undo_stack.append(self._snapshot_strokes())
+        if len(self.undo_stack) > 50: self.undo_stack.pop(0)
+        self.redo_stack = []
+
+    def _pos_inside_menu(self, pos):
+        """True only if pos is within the menu's actual circular footprint -
+        not just its square widget bounding box, which is much bigger than
+        the visible pie and would otherwise block drawing right next to it."""
+        if not self.menu_ref or not self.menu_ref.isVisible(): return False
+        if not hasattr(self.menu_ref, "occupied_region"): 
+            return self.menu_ref.geometry().contains(pos.toPoint())  # fallback
+        global_pos = self.mapToGlobal(pos.toPoint())
+        center, radius = self.menu_ref.occupied_region()
+        dx, dy = global_pos.x() - center.x(), global_pos.y() - center.y()
+        return (dx * dx + dy * dy) <= radius * radius
+
     def get_stroke_type(self):
         if "calligraphy" in self.active_tool: return "calligraphy"
         if "spray" in self.active_tool: return "spray"
@@ -265,6 +306,7 @@ class Canvas(QWidget):
     
     def update_fill_color_selection(self, color):
         if self.selected_indices:
+            self.push_undo_snapshot()
             for i in self.selected_indices:
                 if not self.strokes[i].get("locked", False):
                     self.strokes[i]["fill_color"] = color
@@ -325,6 +367,7 @@ class Canvas(QWidget):
 
     def import_image_stroke(self, pixmap):
         if pixmap.isNull(): return
+        self.push_undo_snapshot()
         max_size = 800
         if pixmap.width() > max_size or pixmap.height() > max_size: pixmap = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         pos = QPointF(100, 100); base_rect = QRectF(0, 0, pixmap.width(), pixmap.height())
@@ -355,6 +398,7 @@ class Canvas(QWidget):
         elif event.matches(QKeySequence.Open) or (key == Qt.Key_I and event.modifiers() == Qt.ControlModifier): self.import_image_from_file(); event.accept()
         elif key == Qt.Key_L and event.modifiers() == Qt.ControlModifier:
             if self.selected_indices:
+                self.push_undo_snapshot()
                 for i in self.selected_indices: self.strokes[i]["locked"] = not self.strokes[i].get("locked", False)
                 self.redraw_buffer(); self.update()
             event.accept()
@@ -374,6 +418,7 @@ class Canvas(QWidget):
                 self.import_image_stroke(QPixmap.fromImage(clipboard.image())); event.accept(); return
 
             if hasattr(self, 'clipboard') and self.clipboard:
+                self.push_undo_snapshot()
                 new_indices = []; offset = QPointF(30, 30); self.selected_indices = []
                 for stroke in self.clipboard:
                     new_stroke = stroke.copy(); new_stroke["locked"] = False
@@ -407,7 +452,9 @@ class Canvas(QWidget):
         elif key == Qt.Key_Delete:
             if self.selected_indices:
                 indices_to_delete = [idx for idx in sorted(self.selected_indices, reverse=True) if not self.strokes[idx].get("locked", False)]
-                for idx in indices_to_delete: self.strokes.pop(idx)
+                if indices_to_delete:
+                    self.push_undo_snapshot()
+                    for idx in indices_to_delete: self.strokes.pop(idx)
                 self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False); self.redraw_buffer(); self.update()
             else: self.handle_action("clear_canvas")
             event.accept()
@@ -447,6 +494,7 @@ class Canvas(QWidget):
         self.active_color = color
         if self.is_internal_sync: return 
         if self.selected_indices:
+            self.push_undo_snapshot()
             for i in self.selected_indices: 
                 if not self.strokes[i].get("locked", False): self.strokes[i]["color"] = color
             self.redraw_buffer(); self.update()
@@ -457,6 +505,7 @@ class Canvas(QWidget):
         self.active_color.setAlpha(opacity)
         if self.is_internal_sync: return 
         if self.selected_indices:
+            self.push_undo_snapshot()
             for i in self.selected_indices:
                 stroke = self.strokes[i]
                 if stroke.get("locked", False): continue
@@ -483,6 +532,7 @@ class Canvas(QWidget):
 
         if self.is_internal_sync: return 
         if self.selected_indices:
+            self.push_undo_snapshot()
             for i in self.selected_indices:
                 stroke = self.strokes[i]
                 if stroke.get("locked", False): continue
@@ -492,27 +542,36 @@ class Canvas(QWidget):
 
     def handle_action(self, action):
         if action == "clear_canvas": 
+            if any(not s.get("locked", False) for s in self.strokes):
+                self.push_undo_snapshot()
             self.strokes = [s for s in self.strokes if s.get("locked", False)]
-            self.redo_stack = []; self.update_selection_rect(); self.redraw_buffer(); self.update()
+            self.selected_indices = []; self.update_selection_rect(); self.redraw_buffer(); self.update()
         elif action == "action_undo": 
-            if self.strokes: 
-                self.redo_stack.append(self.strokes.pop())
-                if len(self.redo_stack) > 50: self.redo_stack.pop(0) 
+            if self.undo_stack:
+                self.redo_stack.append(self._snapshot_strokes())
+                if len(self.redo_stack) > 50: self.redo_stack.pop(0)
+                self.strokes = self.undo_stack.pop()
+                self.selected_indices = []
                 self.update_selection_rect(); self.redraw_buffer(); self.update()
         elif action == "action_redo":
-             if self.redo_stack:
-                stroke = self.redo_stack.pop(); self.strokes.append(stroke)
-                painter = QPainter(self.buffer_pixmap); painter.setRenderHint(QPainter.Antialiasing)
-                self.draw_stroke_entity(painter, stroke); painter.end(); self.update()
+            if self.redo_stack:
+                self.undo_stack.append(self._snapshot_strokes())
+                if len(self.undo_stack) > 50: self.undo_stack.pop(0)
+                self.strokes = self.redo_stack.pop()
+                self.selected_indices = []
+                self.update_selection_rect(); self.redraw_buffer(); self.update()
         elif action == "action_save": self.save_canvas()
         elif action == "action_lock":
              if self.selected_indices:
+                 self.push_undo_snapshot()
                  for i in self.selected_indices: self.strokes[i]["locked"] = not self.strokes[i].get("locked", False)
                  self.redraw_buffer(); self.update()
         elif action == "delete_selection":
             if self.selected_indices:
                 indices_to_delete = [idx for idx in sorted(self.selected_indices, reverse=True) if not self.strokes[idx].get("locked", False)]
-                for idx in indices_to_delete: self.strokes.pop(idx)
+                if indices_to_delete:
+                    self.push_undo_snapshot()
+                    for idx in indices_to_delete: self.strokes.pop(idx)
                 self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False); self.redraw_buffer(); self.update()
         elif action == "clear_selection":
             self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False); self.update()
@@ -595,6 +654,7 @@ class Canvas(QWidget):
         if not self.active_text_widget: return
         text = self.active_text_widget.text()
         if text.strip():
+            self.push_undo_snapshot()
             fm = QFontMetrics(self.active_text_widget.font()); w = fm.horizontalAdvance(text); h = fm.height()
             text_stroke = { "type": "text", "text": text, "pos": pos, "color": QColor(self.active_color), "size": font_size, "font_style": self.active_font_style, "path": QPainterPath(), "text_width": w, "text_height": h, "locked": False }
             self.strokes.append(text_stroke)
@@ -862,6 +922,7 @@ class Canvas(QWidget):
         path = QPainterPath(); path.addPolygon(poly); path.closeSubpath()
         self.current_stroke["path"] = path
         final_stroke = self.current_stroke
+        self.push_undo_snapshot()
         self.strokes.append(final_stroke)
         painter = QPainter(self.buffer_pixmap); painter.setRenderHint(QPainter.Antialiasing)
         self.draw_stroke_entity(painter, final_stroke); painter.end()
@@ -889,6 +950,7 @@ class Canvas(QWidget):
                 if self.selected_indices and ("select" in self.active_tool or "cursor" in self.active_tool):
                     for key, rect in self.get_handles().items():
                         if rect.contains(pos):
+                            self.push_undo_snapshot()
                             self.transform_mode = "rotate" if key == "rot" else "scale"
                             self.active_handle = key; self.move_start_pos = pos
                             self.original_selection_rect = QRectF(self.selection_rect)
@@ -909,7 +971,7 @@ class Canvas(QWidget):
                     self.selected_indices = []; self.update_selection_rect(); state.set_selection_active(False)
                     state.set_active_tool(getattr(self, "last_non_selection_tool", "tool_pen_1"))
                     return
-                if self.menu_ref and self.menu_ref.geometry().contains(pos.toPoint()): return 
+                if self.menu_ref and self._pos_inside_menu(pos): return 
                 
                 if self.active_tool == "tool_text":
                     if self.active_text_widget: self.active_text_widget.deleteLater(); self.active_text_widget = None
@@ -917,11 +979,12 @@ class Canvas(QWidget):
                     return
                 
                 self.is_drawing = True; self.last_pos = pos; self.current_pos = pos; self.start_pos = pos.toPoint()
-                self.redo_stack = []; self.current_points = [pos] 
+                self.current_points = [pos] 
                 self.snapped_shape = None; self.is_scaling_shape = False; self.shape_hold_timer.stop()
 
                 if "select" in self.active_tool or "cursor" in self.active_tool:
                     if self.selected_indices and self.selection_rect.contains(pos):
+                        self.push_undo_snapshot()
                         self.is_moving_selection = True; self.move_start_pos = pos
                         self.redraw_buffer(); self.update(); return
                     had_selection = bool(self.selected_indices)
@@ -933,6 +996,7 @@ class Canvas(QWidget):
                     self.update(); return 
 
                 if "eraser" in self.active_tool and state.eraser_type == "stroke":
+                    self.push_undo_snapshot()
                     if self.delete_stroke_at(pos.toPoint()): self.redraw_buffer(); self.update()
                     return
 
@@ -1120,6 +1184,7 @@ class Canvas(QWidget):
                             path = QPainterPath(); self.generate_shape_path(path, final_stroke["type"], final_stroke["start"], final_stroke["end"]); final_stroke["path"] = path
                     
                     if final_stroke["type"] == "laser_pen": final_stroke["vanish_deadline"] = time.time() + state.laser_duration
+                    self.push_undo_snapshot()
                     self.strokes.append(final_stroke)
                     painter = QPainter(self.buffer_pixmap); painter.setRenderHint(QPainter.Antialiasing)
                     self.draw_stroke_entity(painter, final_stroke); painter.end()
